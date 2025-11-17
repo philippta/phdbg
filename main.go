@@ -16,10 +16,7 @@ import (
 	"github.com/go-delve/delve/service/rpc2"
 )
 
-//go:embed main.go
-var source string
-
-var tableData = [][]string{
+var tableData = [][3]string{
 	{"foo", "100", "int32"},
 	{"foo", "100", "int32"},
 	{"foo", "100", "int32"},
@@ -52,15 +49,15 @@ var (
 
 // bounds
 var (
-	sourceBounds = rl.Rectangle{X: 0, Y: 0, Width: screenWidth * 0.5, Height: screenHeight * 0.75}
-	watchBounds  = rl.Rectangle{X: sourceBounds.Width - 1, Y: 0, Width: screenWidth - sourceBounds.Width + 1, Height: screenHeight * 0.75}
+	sourceBounds = rl.Rectangle{X: 0, Y: 0, Width: screenWidth * 0.5, Height: screenHeight}
+	watchBounds  = rl.Rectangle{X: sourceBounds.Width - 1, Y: 0, Width: screenWidth - sourceBounds.Width + 1, Height: screenHeight}
 	boxBounds    = rl.Rectangle{X: 0, Y: sourceBounds.Height - 1, Width: screenWidth, Height: screenHeight - sourceBounds.Height + 1}
 )
 
 func updateBounds() {
-	sourceBounds = rl.Rectangle{X: 0, Y: 0, Width: screenWidth * 0.5, Height: screenHeight * 0.75}
-	watchBounds = rl.Rectangle{X: sourceBounds.Width - 1, Y: 0, Width: screenWidth - sourceBounds.Width + 1, Height: screenHeight * 0.75}
-	boxBounds = rl.Rectangle{X: 0, Y: sourceBounds.Height - 1, Width: screenWidth, Height: screenHeight - sourceBounds.Height + 1}
+	sourceBounds = rl.Rectangle{X: 0, Y: 0, Width: screenWidth * 0.5, Height: screenHeight}
+	watchBounds = rl.Rectangle{X: sourceBounds.Width - 1, Y: 0, Width: screenWidth - sourceBounds.Width + 1, Height: screenHeight}
+	// boxBounds = rl.Rectangle{X: 0, Y: sourceBounds.Height - 1, Width: screenWidth, Height: screenHeight - sourceBounds.Height + 1}
 }
 
 var (
@@ -80,28 +77,19 @@ func main() {
 
 	<-debugger.Continue()
 	LoadDebugState()
+	LoadVariables()
 
 	rl.SetConfigFlags(rl.FlagWindowUnfocused)
-	rl.InitWindow(int32(screenWidth), int32(screenHeight), "raylib [core] example - basic window")
+	rl.InitWindow(int32(screenWidth), int32(screenHeight), "phdbg")
 	defer rl.CloseWindow()
 
 	rl.SetWindowPosition(screenPositionX, screenPositionY)
 	rl.SetWindowState(rl.FlagWindowResizable)
 	// rl.SetTargetFPS(60)
-	rl.EnableEventWaiting()
+	// rl.EnableEventWaiting()
 
 	font = rl.LoadFontEx("/Users/philipp/Library/Fonts/JetBrainsMono-Medium.ttf", int32(fontSize*2), nil, 0)
 	charWidth = rl.MeasureTextEx(font, " ", fontSize, 0).X
-
-	source := LoadFile(debuggerState.Load().CurrentThread.File)
-	source = strings.TrimSpace(strings.ReplaceAll(source, "\t", "    "))
-	sourceLines := strings.Split(source, "\n")
-	sourceHeight := float32(len(sourceLines)) * fontSize
-	sourceScroll := rl.Vector2{}
-	sourceWidth := float32(0)
-	for _, l := range sourceLines {
-		sourceWidth = max(sourceWidth, float32(len(l))*fontSize)
-	}
 
 	_ = sourceScroll
 
@@ -114,9 +102,27 @@ func main() {
 		}
 
 		if rl.IsKeyPressed(rl.KeyN) {
-			fmt.Println("N")
-			debugger.Next()
-			LoadDebugState()
+			UpdateDebugState(debugger.Next())
+			LoadVariables()
+		}
+		if rl.IsKeyPressed(rl.KeyS) {
+			UpdateDebugState(debugger.Step())
+			LoadVariables()
+		}
+
+		debugState := GetDebugState()
+		sourceScroll.Y = -sourceBounds.Height/2 + float32(debugState.CurrentThread.Line-1)*fontSize
+
+		tableData = [][3]string{}
+		for _, vv := range localVariables {
+			for _, v := range vv {
+				tableData = append(tableData, [3]string{
+					v.Name,
+					v.Value,
+					v.Type,
+				})
+			}
+			tableData = append(tableData, [3]string{})
 		}
 
 		rl.BeginDrawing()
@@ -137,8 +143,7 @@ func main() {
 			DrawMultilineText(x, y+titleHeight, w, h-titleHeight, -sourceScroll.Y, sourceLines, rl.White)
 			DrawOutline(x, y+titleHeight, w, h-titleHeight, rl.DarkBlue)
 
-			line := debuggerState.Load().CurrentThread.Line
-			DrawOutline(x, fontSize*float32(line), w, fontSize, rl.Red)
+			DrawOutline(x, sourceBounds.Height/2+titleHeight, w, fontSize, rl.DarkBlue)
 
 			// Title
 			DrawBackground(x, y, w, titleHeight, rl.DarkBlue)
@@ -175,12 +180,8 @@ func DrawScroller(x, y, h, pos float32) {
 	DrawBackground(x-scrollerWidth, y+rng*pos, scrollerWidth, scrollerHeight, rl.DarkBlue)
 }
 
-func DrawTable(x, y, w, h float32, rows [][]string, color color.RGBA) {
-	if len(rows) == 0 {
-		return
-	}
-
-	numCols := len(rows[0])
+func DrawTable(x, y, w, h float32, rows [][3]string, color color.RGBA) {
+	numCols := 3
 	colWidth := w / float32(numCols)
 
 	rowY := y
@@ -194,8 +195,17 @@ func DrawTable(x, y, w, h float32, rows [][]string, color color.RGBA) {
 	rowY += fontSize
 	DrawHLine(x, rowY, w, rl.DarkBlue)
 
+	if len(rows) == 0 {
+		return
+	}
+
 	for _, row := range rows {
 		rowX := x + 4
+		if row[0] == "" && row[1] == "" && row[2] == "" {
+			DrawHLine(rowX, rowY, w, rl.DarkBlue)
+			continue
+		}
+
 		for _, text := range row {
 			text = clips(text, colWidth)
 			DrawText(rowX, rowY, w, text, rl.White)
@@ -304,20 +314,96 @@ func EndScissorMode() {
 	rl.EndScissorMode()
 }
 
-func LoadFile(name string) string {
+var (
+	lastLoadedFile string
+	sourceLines    []string
+	sourceHeight   float32
+	sourceScroll   rl.Vector2
+	sourceWidth    float32
+)
+
+func LoadFile(name string) {
+	if name == lastLoadedFile {
+		return
+	}
+
 	data, err := os.ReadFile(name)
 	if err != nil {
-		return ""
+		return
 	}
-	return string(data)
+	source := string(data)
+	source = strings.TrimSpace(strings.ReplaceAll(source, "\t", "    "))
+	sourceLines = strings.Split(source, "\n")
+	sourceHeight = float32(len(sourceLines)) * fontSize
+	sourceScroll = rl.Vector2{}
+	sourceWidth = float32(0)
+	for _, l := range sourceLines {
+		sourceWidth = max(sourceWidth, float32(len(l))*fontSize)
+	}
+}
+
+var emptyDebuggerState = &api.DebuggerState{
+	CurrentThread:     &api.Thread{Function: &api.Function{}},
+	SelectedGoroutine: &api.Goroutine{},
 }
 
 func LoadDebugState() {
-	s, err := debugger.GetState()
+	UpdateDebugState(debugger.GetState())
+}
+
+func UpdateDebugState(s *api.DebuggerState, err error) {
 	if err != nil {
 		return
 	}
 	debuggerState.Store(s)
+	if s.CurrentThread != nil {
+		LoadFile(s.CurrentThread.File)
+		fmt.Println(s.CurrentThread.File, s.CurrentThread.Line)
+	}
+}
+
+func GetDebugState() *api.DebuggerState {
+	s := debuggerState.Load()
+	if s == nil {
+		return emptyDebuggerState
+	}
+	return s
+}
+
+var normalLoadConfig = api.LoadConfig{
+	FollowPointers:     true,
+	MaxVariableRecurse: 1,
+	MaxStringLen:       64,
+	MaxArrayValues:     64,
+	MaxStructFields:    -1,
+}
+
+var localVariables [][]api.Variable
+
+func LoadVariables() {
+	s := GetDebugState()
+	if s.SelectedGoroutine.ID == 0 {
+		return
+	}
+	var newVars [][]api.Variable
+
+	for i := 10; i >= 0; i-- {
+		var newVarsInner []api.Variable
+		evalScope := api.EvalScope{Frame: i, GoroutineID: s.SelectedGoroutine.ID}
+
+		if vars, err := debugger.ListFunctionArgs(evalScope, normalLoadConfig); err == nil {
+			newVarsInner = append(newVarsInner, vars...)
+		}
+		if vars, err := debugger.ListLocalVariables(evalScope, normalLoadConfig); err == nil {
+			newVarsInner = append(newVarsInner, vars...)
+		}
+
+		if len(newVarsInner) > 0 {
+			newVars = append(newVars, newVarsInner)
+		}
+	}
+
+	localVariables = newVars
 }
 
 func PrintDebugState(x, y, w, h float32) {
